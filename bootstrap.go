@@ -3,6 +3,7 @@ package secure_bootstrap
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -95,10 +96,14 @@ func GenerateDynamicGML(cfg UIConfig) string {
 
 	for _, btn := range cfg.Buttons {
 		btnClass := ".btn-secondary"
-		if btn.Primary { btnClass = ".btn-primary" }
+		if btn.Primary {
+			btnClass = ".btn-primary"
+		}
 
 		onclickStr := ""
-		if btn.OnClick != "" { onclickStr = fmt.Sprintf(`:onclick."%s"`, btn.OnClick) }
+		if btn.OnClick != "" {
+			onclickStr = fmt.Sprintf(`:onclick."%s"`, btn.OnClick)
+		}
 
 		sb.WriteString(fmt.Sprintf("\n                    button%s:type.\"%s\"%s(\"%s\"),",
 			btnClass, btn.Type, onclickStr, btn.Label))
@@ -114,8 +119,9 @@ func GenerateDynamicGML(cfg UIConfig) string {
 	return sb.String()
 }
 
-// BootstrapAuth binds the dynamic identity provider directly to the router
-func BootstrapAuth(router *secure_network.Router, wa *webauthnext.Provider) {
+// BootstrapAuth binds the dynamic identity provider directly to the router and triggers DBSC on success
+func BootstrapAuth(router *secure_network.Router, wa *webauthnext.Provider, meshNode *secure_network.MeshNode, gatewayAddr string) {
+	// Route 1: Render dynamic UI
 	router.Mux.HandleFunc("/auth", func(w http.ResponseWriter, r *http.Request) {
 		txn := router.DB.BeginTxn()
 		cfgBytes, err := router.DB.Read(ConfigPageID, txn, []byte("ui_settings"))
@@ -130,12 +136,57 @@ func BootstrapAuth(router *secure_network.Router, wa *webauthnext.Provider) {
 
 		gmlSyntax := GenerateDynamicGML(cfg)
 
-		// ✨ FIX: Write the compiled template to disk so guikit's file-based renderer can load it
 		os.MkdirAll("views", 0755)
 		os.WriteFile("views/dynamic_auth.gml", []byte(gmlSyntax), 0644)
 
 		ctx := &guikit.Context{W: w, R: r, Data: make(map[string]interface{})}
 		router.GUIKit.Render(ctx, "views/dynamic_auth")
+	})
+
+	// Route 2: Handle the Passkey verification completion & Join Mesh
+	router.Mux.HandleFunc("/auth/callback", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		username := r.URL.Query().Get("username")
+		if username == "" {
+			http.Error(w, "Missing username parameter", http.StatusBadRequest)
+			return
+		}
+
+		// 1. Validate the hardware passkey assertion via webauthnext
+		_, err := wa.FinishLogin(username, r)
+		if err != nil {
+			log.Printf("[AUTH] Passkey verification failed for %s: %v", username, err)
+			http.Error(w, "Invalid passkey assertion", http.StatusUnauthorized)
+			return
+		}
+
+		// 2. Establish the secure session cookie
+		cookieValue := "user_session_" + username
+		http.SetCookie(w, &http.Cookie{
+			Name:     "session_id",
+			Value:    cookieValue,
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteStrictMode,
+		})
+
+		// 3. TRIGGER DBSC MESH JOIN IMMEDIATELY
+		log.Printf("[AUTH] User '%s' verified. Initializing secure overlay tunnel...", username)
+		go func() {
+			if err := meshNode.Connect(gatewayAddr); err != nil {
+				log.Printf("[SECURE_MESH] ❌ DBSC Auto-Connect Failed for user %s: %v", username, err)
+				return
+			}
+			log.Printf("[SECURE_MESH] ✅ DBSC Secure Tunnel Established successfully for user %s", username)
+		}()
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"success"}`))
 	})
 }
 
@@ -149,7 +200,6 @@ func RequireAuth(router *secure_network.Router, next func(c *guikit.Context)) fu
 		}
 
 		user := ""
-		// ✨ FIX: Parse the exact cookie pattern webauthnext sets ("user_session_" + username)
 		if strings.HasPrefix(cookie.Value, "user_session_") {
 			user = strings.TrimPrefix(cookie.Value, "user_session_")
 		}
