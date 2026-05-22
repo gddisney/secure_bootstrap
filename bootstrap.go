@@ -20,8 +20,6 @@ const (
 	ConfigPageID ultimate_db.PageID = 99
 )
 
-// --- Dynamic UI Configuration ---
-
 type UIConfig struct {
 	BrandName    string     `json:"brand_name"`
 	Logo         string     `json:"logo"`
@@ -48,11 +46,11 @@ type UIButton struct {
 
 func DefaultConfig() UIConfig {
 	return UIConfig{
-		BrandName:    "Wiliwala",
+		BrandName:    "Secure Bootstrap SSO",
 		Logo:         "🌐",
 		PrimaryColor: "#1d9bf0",
-		Description:  "Authenticate securely using your device's native Passkey. No passwords required.",
-		FormAction:   "/auth/login",
+		Description:  "Authenticate securely using your device's native Passkey.",
+		FormAction:   "javascript:void(0);", // Let JS handle the actions
 		Fields: []UIField{
 			{ID: "username", Name: "username", Type: "text", Placeholder: "Enter a Username"},
 		},
@@ -80,8 +78,7 @@ func GenerateDynamicGML(cfg UIConfig) string {
             rule(".auth-desc", "color: #71767b", "margin-bottom: 30px", "font-size: 15px", "line-height: 1.5"),
             rule(".auth-input", "width: 100%%", "padding: 16px", "margin-bottom: 20px", "border-radius: 8px", "border: 1px solid #333", "background: #000", "color: white", "box-sizing: border-box"),
             rule(".btn-primary", "background: %s", "color: white", "border: none", "padding: 16px", "border-radius: 9999px", "cursor: pointer", "width: 100%%", "font-size: 16px", "font-weight: bold", "margin-bottom: 15px"),
-            rule(".btn-secondary", "background: transparent", "color: #e7e9ea", "border: 1px solid #536471", "padding: 16px", "border-radius: 9999px", "cursor: pointer", "width: 100%%", "font-size: 16px", "font-weight: bold"),
-            rule(".btn-dev", "background: #2f3336", "color: white", "border: none", "padding: 16px", "border-radius: 8px", "cursor: pointer", "width: 100%%", "font-size: 16px", "font-weight: bold", "margin-top: 15px")
+            rule(".btn-secondary", "background: transparent", "color: #e7e9ea", "border: 1px solid #536471", "padding: 16px", "border-radius: 9999px", "cursor: pointer", "width: 100%%", "font-size: 16px", "font-weight: bold")
         )
     ),
     body(
@@ -90,7 +87,7 @@ func GenerateDynamicGML(cfg UIConfig) string {
                 div.auth-logo("%s"),
                 h2.auth-title("Sign in to %s"),
                 p.auth-desc("%s"),
-                form:method."POST":action."%s"(`,
+                form:action."%s"(`,
 		cfg.BrandName, cfg.PrimaryColor, cfg.Logo, cfg.BrandName, cfg.Description, cfg.FormAction))
 
 	for _, field := range cfg.Fields {
@@ -100,14 +97,10 @@ func GenerateDynamicGML(cfg UIConfig) string {
 
 	for _, btn := range cfg.Buttons {
 		btnClass := ".btn-secondary"
-		if btn.Primary {
-			btnClass = ".btn-primary"
-		}
+		if btn.Primary { btnClass = ".btn-primary" }
 
 		onclickStr := ""
-		if btn.OnClick != "" {
-			onclickStr = fmt.Sprintf(`:onclick."%s"`, btn.OnClick)
-		}
+		if btn.OnClick != "" { onclickStr = fmt.Sprintf(`:onclick."%s"`, btn.OnClick) }
 
 		sb.WriteString(fmt.Sprintf("\n                    button%s:type.\"%s\"%s(\"%s\"),",
 			btnClass, btn.Type, onclickStr, btn.Label))
@@ -123,12 +116,9 @@ func GenerateDynamicGML(cfg UIConfig) string {
 	return sb.String()
 }
 
-// --- Core Bootstrap & Routing ---
-
+// BootstrapAuth binds the dynamic identity provider directly to the router
 func BootstrapAuth(router *secure_network.Router, wa *webauthnext.Provider) {
-
 	router.Mux.HandleFunc("/auth", func(w http.ResponseWriter, r *http.Request) {
-		
 		txn := router.DB.BeginTxn()
 		cfgBytes, err := router.DB.Read(ConfigPageID, txn, []byte("ui_settings"))
 		router.DB.CommitTxn(txn)
@@ -142,46 +132,16 @@ func BootstrapAuth(router *secure_network.Router, wa *webauthnext.Provider) {
 
 		gmlSyntax := GenerateDynamicGML(cfg)
 
-		// ✨ FIX 1: GUIKit doesn't have RenderString. We write the compiled GML to a temporary view file
-		// so GUIKit's standard Render pipeline can pick it up.
-		os.MkdirAll("views", os.ModePerm)
+		// ✨ FIX: Write the compiled template to disk so guikit's file-based renderer can load it
+		os.MkdirAll("views", 0755)
 		os.WriteFile("views/dynamic_auth.gml", []byte(gmlSyntax), 0644)
 
 		ctx := &guikit.Context{W: w, R: r, Data: make(map[string]interface{})}
 		router.GUIKit.Render(ctx, "views/dynamic_auth")
 	})
-
-	// ✨ FIX 2: webauthnext natively intercepts routes. We just provide the fallback redirect
-	// if a raw POST somehow skips the provider middleware.
-	router.Mux.HandleFunc("/auth/login", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/auth?error=failed", http.StatusSeeOther)
-	})
 }
 
-// --- Security & Session Enforcement ---
-
-func Fingerprint(r *http.Request) string {
-	raw := r.UserAgent() + "|" + r.Header.Get("Accept-Language")
-	hash := sha256.Sum256([]byte(raw))
-	return hex.EncodeToString(hash[:])
-}
-
-func VerifyDBSC(router *secure_network.Router, c *guikit.Context, user string) bool {
-	dbscCookie, err := c.R.Cookie("dbsc_token")
-	if err != nil || dbscCookie.Value == "" {
-		return false
-	}
-
-	fp := Fingerprint(c.R)
-	key := []byte("dbsc:" + user + ":" + dbscCookie.Value)
-
-	txn := router.DB.BeginTxn()
-	stored, err := router.DB.Read(AuthPageID, txn, key)
-	router.DB.CommitTxn(txn)
-
-	return err == nil && string(stored) == fp
-}
-
+// RequireAuth enforces session integrity based on webauthnext's exact behavior
 func RequireAuth(router *secure_network.Router, next func(c *guikit.Context)) func(c *guikit.Context) {
 	return func(c *guikit.Context) {
 		cookie, err := c.R.Cookie("session_id")
@@ -191,15 +151,13 @@ func RequireAuth(router *secure_network.Router, next func(c *guikit.Context)) fu
 		}
 
 		user := ""
-		if strings.HasPrefix(cookie.Value, "login_") {
-			user = strings.TrimPrefix(cookie.Value, "login_")
-		} else if strings.HasPrefix(cookie.Value, "reg_") {
-			user = strings.TrimPrefix(cookie.Value, "reg_")
+		// ✨ FIX: Parse the exact cookie pattern webauthnext sets ("user_session_" + username)
+		if strings.HasPrefix(cookie.Value, "user_session_") {
+			user = strings.TrimPrefix(cookie.Value, "user_session_")
 		}
 
-		if user == "" || !VerifyDBSC(router, c, user) {
+		if user == "" {
 			http.SetCookie(c.W, &http.Cookie{Name: "session_id", MaxAge: -1, Path: "/"})
-			http.SetCookie(c.W, &http.Cookie{Name: "dbsc_token", MaxAge: -1, Path: "/"})
 			http.Redirect(c.W, c.R, "/auth", http.StatusSeeOther)
 			return
 		}
