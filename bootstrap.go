@@ -10,6 +10,7 @@ import (
 
 	"github.com/gddisney/guikit"
 	"github.com/gddisney/secure_network"
+	"github.com/gddisney/secure_policy"
 	"github.com/gddisney/ultimate_db"
 	"github.com/gddisney/webauthnext"
 )
@@ -20,12 +21,11 @@ const (
 )
 
 type UIConfig struct {
-	BrandName    string     `json:"brand_name"`
-	Logo         string     `json:"logo"`
-	PrimaryColor string     `json:"primary_color"`
-	Description  string     `json:"description"`
-	FormAction   string     `json:"form_action"`
-	Fields       []UIField  `json:"fields"`
+	BrandName    string    `json:"brand_name"`
+	Logo         string    `json:"logo"`
+	PrimaryColor string    `json:"primary_color"`
+	Description  string    `json:"description"`
+	Fields       []UIField `json:"fields"`
 	Buttons      []UIButton `json:"buttons"`
 }
 
@@ -46,10 +46,9 @@ type UIButton struct {
 func DefaultConfig() UIConfig {
 	return UIConfig{
 		BrandName:    "Secure Bootstrap SSO",
-		Logo:         "🌐",
+		Logo:         "Identity",
 		PrimaryColor: "#1d9bf0",
 		Description:  "Authenticate securely using your device's native Passkey.",
-		FormAction:   "javascript:void(0);", // Let JS handle the actions
 		Fields: []UIField{
 			{ID: "username", Name: "username", Type: "text", Placeholder: "Enter a Username"},
 		},
@@ -86,8 +85,8 @@ func GenerateDynamicGML(cfg UIConfig) string {
                 div.auth-logo("%s"),
                 h2.auth-title("Sign in to %s"),
                 p.auth-desc("%s"),
-                form:action."%s"(`,
-		cfg.BrandName, cfg.PrimaryColor, cfg.Logo, cfg.BrandName, cfg.Description, cfg.FormAction))
+                form:onsubmit."event.preventDefault();"(`,
+		cfg.BrandName, cfg.PrimaryColor, cfg.Logo, cfg.BrandName, cfg.Description))
 
 	for _, field := range cfg.Fields {
 		sb.WriteString(fmt.Sprintf("\n                    input.auth-input:id.\"%s\":name.\"%s\":type.\"%s\":placeholder.\"%s\"(),",
@@ -188,24 +187,50 @@ func BootstrapAuth(router *secure_network.Router, wa *webauthnext.Provider, mesh
 			return
 		}
 
-		// 1. Wrap the ResponseWriter with our Spy interceptor
 		interceptor := &loginInterceptor{ResponseWriter: w, username: username}
-
-		// 2. Let webauthnext validate the payload and write to our interceptor
 		wa.FinishLogin(interceptor, r)
 
-		// 3. If the interceptor caught a 200 OK, the passkey was valid! Trigger the mesh.
 		if interceptor.status == http.StatusOK {
 			log.Printf("[AUTH] User '%s' verified. Initializing secure overlay tunnel...", username)
 			go func() {
 				if err := meshNode.Connect(gatewayAddr); err != nil {
-					log.Printf("[SECURE_MESH] ❌ DBSC Auto-Connect Failed for user %s: %v", username, err)
+					log.Printf("[SECURE_MESH] DBSC Auto-Connect Failed for user %s: %v", username, err)
 					return
 				}
-				log.Printf("[SECURE_MESH] ✅ DBSC Secure Tunnel Established successfully for user %s", username)
+				log.Printf("[SECURE_MESH] DBSC Secure Tunnel Established successfully for user %s", username)
 			}()
 		} else {
 			log.Printf("[AUTH] Passkey verification failed for %s", username)
+		}
+	})
+
+	// Route 3: Handle Passkey Registration Completion
+	router.Mux.HandleFunc("/auth/register/callback", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		username := r.URL.Query().Get("username")
+		if username == "" {
+			http.Error(w, "Missing username parameter", http.StatusBadRequest)
+			return
+		}
+
+		interceptor := &loginInterceptor{ResponseWriter: w, username: username}
+		wa.FinishRegistration(interceptor, r)
+
+		if interceptor.status == http.StatusOK {
+			log.Printf("[AUTH] User '%s' registered and verified. Initializing secure overlay tunnel...", username)
+			go func() {
+				if err := meshNode.Connect(gatewayAddr); err != nil {
+					log.Printf("[SECURE_MESH] DBSC Auto-Connect Failed for user %s: %v", username, err)
+					return
+				}
+				log.Printf("[SECURE_MESH] DBSC Secure Tunnel Established successfully for user %s", username)
+			}()
+		} else {
+			log.Printf("[AUTH] Passkey registration failed for %s", username)
 		}
 	})
 }
@@ -233,4 +258,54 @@ func RequireAuth(router *secure_network.Router, next func(c *guikit.Context)) fu
 		c.Data["CurrentUser"] = user
 		next(c)
 	}
+}
+
+// RequirePolicy ensures the user is logged in AND has the required policy permissions
+func RequirePolicy(pe *secure_policy.PolicyEngine, action, resource string, next func(c *guikit.Context)) func(c *guikit.Context) {
+	return func(c *guikit.Context) {
+		cookie, err := c.R.Cookie("session_id")
+		if err != nil || cookie.Value == "" {
+			http.Redirect(c.W, c.R, "/auth", http.StatusSeeOther)
+			return
+		}
+
+		user := ""
+		if strings.HasPrefix(cookie.Value, "user_session_") {
+			user = strings.TrimPrefix(cookie.Value, "user_session_")
+		}
+
+		if user == "" {
+			http.SetCookie(c.W, &http.Cookie{Name: "session_id", MaxAge: -1, Path: "/"})
+			http.Redirect(c.W, c.R, "/auth", http.StatusSeeOther)
+			return
+		}
+
+		// Evaluate the user's permissions using the Zero-Trust policy engine
+		if !pe.Evaluate([]byte(user), action, resource, nil) {
+			c.W.WriteHeader(http.StatusForbidden)
+			c.W.Write([]byte("403 Forbidden: You do not have the required class or permissions to access this resource."))
+			return
+		}
+
+		c.Data["CurrentUser"] = user
+		next(c)
+	}
+}
+
+// HandleLogout safely destroys the authentication session and redirects to the login screen
+func HandleLogout(c *guikit.Context) {
+	http.SetCookie(c.W, &http.Cookie{
+		Name:     "session_id",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   true, 
+	})
+
+	c.W.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.W.Header().Set("Pragma", "no-cache")
+	c.W.Header().Set("Expires", "0")
+
+	http.Redirect(c.W, c.R, "/auth", http.StatusSeeOther)
 }
