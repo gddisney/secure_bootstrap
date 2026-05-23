@@ -3,7 +3,6 @@ package secure_bootstrap
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"strings"
