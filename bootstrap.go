@@ -201,6 +201,5 @@ func RequireAuth(router *secure_network.Router, next func(c *guikit.Context)) fu
 		next(c)
 	}
 }
-
 func RequirePolicy(pe *secure_policy.PolicyEngine, action, resource string, next func(c *guikit.Context)) func(c *guikit.Context) {
 	return func(c *guikit
