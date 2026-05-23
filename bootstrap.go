@@ -309,3 +309,28 @@ func HandleLogout(c *guikit.Context) {
 
 	http.Redirect(c.W, c.R, "/auth", http.StatusSeeOther)
 }
+
+// EnforcePolicy protects standard HTTP endpoints that do not use GUIKit
+func EnforcePolicy(pe *secure_policy.PolicyEngine, action, resource string) func(http.HandlerFunc) http.HandlerFunc {
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			cookie, err := r.Cookie("session_id")
+			if err != nil || cookie.Value == "" {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+
+			user := ""
+			if strings.HasPrefix(cookie.Value, "user_session_") {
+				user = strings.TrimPrefix(cookie.Value, "user_session_")
+			}
+
+			if user == "" || !pe.Evaluate([]byte(user), action, resource, nil) {
+				http.Error(w, "403 Forbidden: Missing required class or permissions.", http.StatusForbidden)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		}
+	}
+}
