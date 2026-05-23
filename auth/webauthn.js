@@ -2,6 +2,7 @@ async function passkeyRegister(username) {
     try {
         if (!username) throw new Error("Please enter a username");
         
+        // 1. Begin Phase
         const resp = await fetch('/auth/register/begin?username=' + encodeURIComponent(username));
         if (!resp.ok) throw new Error("Server error: " + await resp.text());
         const opts = await resp.json();
@@ -12,8 +13,12 @@ async function passkeyRegister(username) {
             opts.publicKey.excludeCredentials.forEach(c => c.id = base64urlToBuffer(c.id));
         }
 
+        // 2. Browser API Call
         const cred = await navigator.credentials.create({ publicKey: opts.publicKey });
         
+        // 3. Finish Phase
+        // Use standard POST. The server's loginInterceptor will catch the result 
+        // and set the 'session_id' cookie automatically.
         const finishResp = await fetch('/auth/register/finish?username=' + encodeURIComponent(username), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -28,8 +33,10 @@ async function passkeyRegister(username) {
             }),
         });
         
-        if (!finishResp.ok) throw new Error("Server rejected registration: " + await finishResp.text());
-        alert("Registration complete!");
+        if (!finishResp.ok) throw new Error("Registration Failed: " + await finishResp.text());
+        
+        // Redirect to trigger session validation
+        window.location.href = "/";
     } catch (err) {
         console.error(err);
         alert("Registration Failed: " + err.message);
@@ -40,6 +47,7 @@ async function passkeyLogin(username) {
     try {
         if (!username) throw new Error("Please enter a username");
 
+        // 1. Begin Phase
         const resp = await fetch('/auth/login/begin?username=' + encodeURIComponent(username));
         if (!resp.ok) throw new Error("Server error: " + await resp.text());
         const opts = await resp.json();
@@ -49,8 +57,10 @@ async function passkeyLogin(username) {
             opts.publicKey.allowCredentials.forEach(c => c.id = base64urlToBuffer(c.id));
         }
 
+        // 2. Browser API Call
         const assertion = await navigator.credentials.get({ publicKey: opts.publicKey });
         
+        // 3. Finish Phase
         const finishResp = await fetch('/auth/login/finish?username=' + encodeURIComponent(username), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -67,9 +77,10 @@ async function passkeyLogin(username) {
             }),
         });
 
-        if (!finishResp.ok) throw new Error("Server rejected login: " + await finishResp.text());
+        if (!finishResp.ok) throw new Error("Login Rejected: " + await finishResp.text());
         
-        // ADDED: Redirect the user to the frontpage after a successful login!
+        // Redirect will now succeed because the 'session_id' cookie was set 
+        // by the server's loginInterceptor during the fetch call above.
         window.location.href = "/";
         
     } catch (err) {
@@ -78,7 +89,7 @@ async function passkeyLogin(username) {
     }
 }
 
-// Utility functions to handle Base64URL conversions required by the WebAuthn API
+// Utility functions remain identical
 function bufferToBase64url(buffer) {
     const bytes = new Uint8Array(buffer);
     let str = '';
