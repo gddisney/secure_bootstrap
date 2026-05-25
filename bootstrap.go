@@ -7,7 +7,6 @@ import (
 	"github.com/gddisney/guikit"
 	"github.com/gddisney/identity_provider"
 	"github.com/gddisney/orchid_sync"
-	"github.com/gddisney/secure_bootstrap"
 	"github.com/gddisney/secure_network"
 	"github.com/gddisney/secure_policy"
 	"github.com/gddisney/ultimate_db"
