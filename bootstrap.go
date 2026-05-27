@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gddisney/guikit"
+	"github.com/gddisney/logger"
 	"github.com/gddisney/secure_network"
 	"github.com/gddisney/ultimate_db"
 	"github.com/gddisney/webauthnext"
@@ -145,7 +146,8 @@ func (i *loginInterceptor) Write(b []byte) (int, error) {
 	return i.ResponseWriter.Write(b)
 }
 
-func BootstrapAuth(router *secure_network.Router, wa *webauthnext.Provider, meshNode *secure_network.MeshNode, gatewayAddr string) {
+// Injected LogDispatcher into the bootstrap flow
+func BootstrapAuth(router *secure_network.Router, wa *webauthnext.Provider, meshNode *secure_network.MeshNode, gatewayAddr string, sysLog *logger.LogDispatcher) {
 	router.Mux.HandleFunc("/auth", func(w http.ResponseWriter, r *http.Request) {
 		txn := router.DB.BeginTxn()
 		cfgBytes, err := router.DB.Read(ConfigPageID, txn, []byte("ui_settings"))
@@ -182,16 +184,21 @@ func BootstrapAuth(router *secure_network.Router, wa *webauthnext.Provider, mesh
 		wa.FinishLogin(interceptor, r)
 
 		if interceptor.status == http.StatusOK {
-			log.Printf("[AUTH] User '%s' verified. Initializing secure overlay tunnel...", username)
+			if sysLog != nil {
+				sysLog.Audit(username, "AUTH_SUCCESS", "Passkey verified. Initializing secure overlay tunnel.")
+			}
+
 			go func() {
 				if err := meshNode.Connect(gatewayAddr); err != nil {
-					log.Printf("[SECURE_MESH] ❌ DBSC Auto-Connect Failed for user %s: %v", username, err)
+					if sysLog != nil { sysLog.Error(fmt.Sprintf("DBSC Auto-Connect Failed for user %s: %v", username, err)) }
 					return
 				}
-				log.Printf("[SECURE_MESH] ✅ DBSC Secure Tunnel Established successfully for user %s", username)
+				if sysLog != nil { sysLog.Info(fmt.Sprintf("DBSC Secure Tunnel Established successfully for user %s", username)) }
 			}()
 		} else {
-			log.Printf("[AUTH] Passkey verification failed for %s", username)
+			if sysLog != nil {
+				sysLog.Audit(username, "AUTH_FAILED", "Passkey verification failed or was rejected")
+			}
 		}
 	})
 }
