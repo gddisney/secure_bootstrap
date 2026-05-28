@@ -1,6 +1,7 @@
 package secure_bootstrap
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -188,7 +189,8 @@ func BootstrapAuth(router *secure_network.Router, wa *webauthnext.Provider, mesh
 			}
 
 			go func() {
-				if err := meshNode.Connect(gatewayAddr); err != nil {
+				// We use context.Background() here because this routine outlives the HTTP request context.
+				if err := meshNode.Connect(context.Background(), gatewayAddr); err != nil {
 					if sysLog != nil { sysLog.Error(fmt.Sprintf("DBSC Auto-Connect Failed for user %s: %v", username, err)) }
 					return
 				}
