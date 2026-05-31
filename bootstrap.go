@@ -146,9 +146,10 @@ func (i *loginInterceptor) Write(b []byte) (int, error) {
 	return i.ResponseWriter.Write(b)
 }
 
-// Injected LogDispatcher into the bootstrap flow
+// BootstrapAuth configures the HTTP endpoint mappings backed by the 0TrustCloud networking core
 func BootstrapAuth(router *secure_network.Router, wa *webauthnext.Provider, meshNode *secure_network.MeshNode, gatewayAddr string, sysLog *logger.LogDispatcher) {
 	router.Mux.HandleFunc("/auth", func(w http.ResponseWriter, r *http.Request) {
+		// Aligned with ultimate_db's precise transactional and page signature requirements
 		txn := router.DB.BeginTxn()
 		cfgBytes, err := router.DB.Read(ConfigPageID, txn, []byte("ui_settings"))
 		router.DB.CommitTxn(txn)
@@ -161,8 +162,8 @@ func BootstrapAuth(router *secure_network.Router, wa *webauthnext.Provider, mesh
 		}
 
 		gmlSyntax := GenerateDynamicGML(cfg)
-		os.MkdirAll("views", 0755)
-		os.WriteFile("views/dynamic_auth.gml", []byte(gmlSyntax), 0644)
+		_ = os.MkdirAll("views", 0755)
+		_ = os.WriteFile("views/dynamic_auth.gml", []byte(gmlSyntax), 0644)
 
 		ctx := &guikit.Context{W: w, R: r, Data: make(map[string]interface{})}
 		router.GUIKit.Render(ctx, "views/dynamic_auth")
@@ -185,20 +186,24 @@ func BootstrapAuth(router *secure_network.Router, wa *webauthnext.Provider, mesh
 
 		if interceptor.status == http.StatusOK {
 			if sysLog != nil {
-				sysLog.Audit(username, "AUTH_SUCCESS", "Passkey verified. Initializing secure overlay tunnel.")
+				sysLog.MakeAudit(username, "AUTH_SUCCESS", "Passkey verified. Initializing secure overlay tunnel.")
 			}
 
 			go func() {
-				// We use context.Background() here because this routine outlives the HTTP request context.
+				// context.Background() handles async background connections that outlive the parent HTTP lifespan safely
 				if err := meshNode.Connect(context.Background(), gatewayAddr); err != nil {
-					if sysLog != nil { sysLog.Error(fmt.Sprintf("DBSC Auto-Connect Failed for user %s: %v", username, err)) }
+					if sysLog != nil {
+						sysLog.Error(fmt.Sprintf("DBSC Auto-Connect Failed for user %s: %v", username, err))
+					}
 					return
 				}
-				if sysLog != nil { sysLog.Info(fmt.Sprintf("DBSC Secure Tunnel Established successfully for user %s", username)) }
+				if sysLog != nil {
+					sysLog.Info(fmt.Sprintf("DBSC Secure Tunnel Established successfully for user %s", username))
+				}
 			}()
 		} else {
 			if sysLog != nil {
-				sysLog.Audit(username, "AUTH_FAILED", "Passkey verification failed or was rejected")
+				sysLog.MakeAudit(username, "AUTH_FAILED", "Passkey verification failed or was rejected")
 			}
 		}
 	})
